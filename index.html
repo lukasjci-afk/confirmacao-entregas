@@ -12,6 +12,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script async src="https://docs.opencv.org/4.8.0/opencv.js"></script>
 <style>
   :root{
     --void:#0E1116; --steel:#171C24; --steel2:#1E2530; --line:#2A333F;
@@ -49,9 +50,18 @@
   .brand small{display:block;font-size:10px;letter-spacing:.16em;color:var(--slate);font-weight:600}
   .brand b{color:var(--strap)}
   .modepill{
-    margin-left:auto;display:flex;background:rgba(23,28,36,.9);border:1px solid var(--line);
-    border-radius:999px;padding:3px;backdrop-filter:blur(6px);
+    margin-left:8px;display:flex;background:rgba(23,28,36,.9);border:1px solid var(--line);
+    border-radius:999px;padding:3px;backdrop-filter:blur(6px);flex:none;
   }
+  .hbtn{
+    margin-left:auto;width:38px;height:38px;flex:none;border-radius:11px;border:1px solid var(--line);
+    background:rgba(23,28,36,.9);color:var(--slate);cursor:pointer;display:grid;place-items:center;
+    backdrop-filter:blur(6px);
+  }
+  .hbtn svg{width:19px;height:19px}
+  .hbtn.on{background:var(--hiviz);border-color:var(--hiviz);color:#0E1116}
+  .brand{min-width:0}
+  .brand small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;max-width:180px}
   .modepill button{
     border:0;background:transparent;color:var(--slate);cursor:pointer;
     font-family:"Barlow Condensed",sans-serif;text-transform:uppercase;letter-spacing:.06em;
@@ -62,6 +72,18 @@
   /* ---------- camera stage ---------- */
   #stage{position:relative;flex:1;min-height:0;background:#000;overflow:hidden}
   #video{width:100%;height:100%;object-fit:cover;display:block}
+  #overlayCv{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2}
+  .detchip{
+    position:absolute;top:calc(env(safe-area-inset-top) + 60px);left:50%;transform:translateX(-50%);
+    z-index:3;background:rgba(23,28,36,.9);border:1px solid var(--line);border-radius:999px;
+    padding:6px 14px;font-size:12.5px;font-weight:500;display:flex;align-items:center;gap:8px;
+    backdrop-filter:blur(6px);white-space:nowrap;transition:border-color .2s;
+  }
+  .detchip .d{width:8px;height:8px;border-radius:50%;background:var(--slate);transition:background .2s}
+  .detchip.locked{border-color:rgba(200,240,49,.55)}
+  .detchip.locked .d{background:var(--hiviz)}
+  .detchip.off{display:none}
+  #staticGuide{transition:opacity .25s}
 
   /* moldura de enquadramento — assinatura visual */
   .frame{position:absolute;inset:0;pointer-events:none}
@@ -228,6 +250,9 @@
   <section class="screen on" id="scrCamera">
     <header>
       <div class="brand">CONFIRMAÇÃO DE <b>ENTREGA(S)</b><small>Transportes ARI · scanner de canhotos</small></div>
+      <button class="hbtn on" id="btnCrop" title="Recorte automático">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/></svg>
+      </button>
       <div class="modepill" id="modePill">
         <button data-mode="single" class="on">Único</button>
         <button data-mode="batch">Lote</button>
@@ -236,10 +261,12 @@
 
     <div id="stage">
       <video id="video" playsinline autoplay muted></video>
+      <canvas id="overlayCv"></canvas>
+      <div class="detchip" id="detChip"><span class="d"></span><span class="t">Preparando detector…</span></div>
       <div class="frame">
         <div class="scanline" id="scanline"></div>
-        <div class="guide">
-          <div class="hint">Enquadre o canhoto assinado</div>
+        <div class="guide" id="staticGuide">
+          <div class="hint">Aponte para o canhoto assinado</div>
           <i></i><i></i><i></i><i></i>
         </div>
       </div>
@@ -345,6 +372,12 @@ let stagedCanvas=null;          // canvas processado aguardando confirmação
 const pages=[];                 // [{dataUrl,w,h}]
 let lastPdf=null;               // {blob,name}
 
+/* ---------- detecção de documento (OpenCV) ---------- */
+let CV=null, cvReady=false, autoCrop=true;
+let lastQuad=null, lastQuadAt=0, lastDet=0;
+const detCanvas=document.createElement('canvas');
+const DET_W=340;                // largura reduzida usada só p/ detectar (desempenho)
+
 /* ---------- utils ---------- */
 function clamp(v){ return v<0?0:v>255?255:v; }
 function pad(n){ return String(n).padStart(2,'0'); }
@@ -376,16 +409,133 @@ async function startCamera(){
 }
 
 /* ---------- processamento p/ legibilidade ---------- */
-function processFrame(){
-  const track=stream.getVideoTracks()[0], s=track.getSettings();
-  let W=video.videoWidth||s.width||1280, H=video.videoHeight||s.height||720;
-  // limita resolução p/ desempenho e tamanho do PDF
-  const MAX=1800, sc=Math.min(1, MAX/Math.max(W,H));
-  const w=Math.round(W*sc), h=Math.round(H*sc);
-  work.width=w; work.height=h;
-  const ctx=work.getContext('2d',{willReadFrequently:true});
-  ctx.drawImage(video,0,0,w,h);
+/* ---------- OpenCV: inicialização tolerante a diferentes builds ---------- */
+(function initCv(){
+  const g=window;
+  if(g.cv && g.cv.Mat){ CV=g.cv; cvReady=true; return; }
+  if(g.cv && typeof g.cv.then==='function'){ g.cv.then(m=>{ CV=m||g.cv; cvReady=!!(CV&&CV.Mat); }); }
+  setTimeout(initCv,150);
+})();
 
+/* ---------- laço de detecção + desenho da borda ---------- */
+function loop(){
+  requestAnimationFrame(loop);
+  if(cvReady && stream && video.readyState>=2 && video.videoWidth){
+    const now=performance.now();
+    if(now-lastDet>=110){ lastDet=now; try{ detect(now); }catch(e){} }
+  }
+  drawOverlay();
+}
+
+function detect(now){
+  const vw=video.videoWidth, vh=video.videoHeight;
+  const s=DET_W/vw, dh=Math.round(vh*s);
+  detCanvas.width=DET_W; detCanvas.height=dh;
+  detCanvas.getContext('2d',{willReadFrequently:true}).drawImage(video,0,0,DET_W,dh);
+
+  let src,gray,edges,ker,cnts,hier;
+  try{
+    src=CV.imread(detCanvas);
+    gray=new CV.Mat(); CV.cvtColor(src,gray,CV.COLOR_RGBA2GRAY);
+    CV.GaussianBlur(gray,gray,new CV.Size(5,5),0);
+    edges=new CV.Mat(); CV.Canny(gray,edges,60,180);
+    ker=CV.Mat.ones(3,3,CV.CV_8U); CV.dilate(edges,edges,ker);
+    cnts=new CV.MatVector(); hier=new CV.Mat();
+    CV.findContours(edges,cnts,hier,CV.RETR_EXTERNAL,CV.CHAIN_APPROX_SIMPLE);
+    const areaMin=DET_W*dh*0.18; let bestA=areaMin, best=null;
+    for(let i=0;i<cnts.size();i++){
+      const c=cnts.get(i); const a=CV.contourArea(c);
+      if(a>bestA){
+        const peri=CV.arcLength(c,true); const ap=new CV.Mat();
+        CV.approxPolyDP(c,ap,0.02*peri,true);
+        if(ap.rows===4 && CV.isContourConvex(ap)){
+          bestA=a; best=[];
+          for(let j=0;j<4;j++) best.push({x:ap.data32S[j*2]/s, y:ap.data32S[j*2+1]/s});
+        }
+        ap.delete();
+      }
+      c.delete();
+    }
+    if(best){ lastQuad=best; lastQuadAt=now; }
+    else if(now-lastQuadAt>450){ lastQuad=null; }
+  }finally{
+    [src,gray,edges,ker,cnts,hier].forEach(m=>{ try{ m&&m.delete(); }catch(e){} });
+  }
+}
+
+/* mapeia coordenada do vídeo → coordenada exibida (object-fit:cover) */
+function videoToDisplay(pt){
+  const st=$('#stage'), vw=video.videoWidth, vh=video.videoHeight;
+  const sw=st.clientWidth, sh=st.clientHeight, scale=Math.max(sw/vw,sh/vh);
+  return { x: pt.x*scale+(sw-vw*scale)/2, y: pt.y*scale+(sh-vh*scale)/2 };
+}
+
+function drawOverlay(){
+  const st=$('#stage'), ov=$('#overlayCv'), dpr=window.devicePixelRatio||1;
+  const sw=st.clientWidth, sh=st.clientHeight;
+  if(ov.width!==Math.round(sw*dpr)){ ov.width=Math.round(sw*dpr); ov.height=Math.round(sh*dpr); }
+  const g=ov.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,sw,sh);
+  const chip=$('#detChip'), t=chip.querySelector('.t');
+
+  if(!autoCrop){ chip.className='detchip off'; $('#staticGuide').style.opacity=1; return; }
+  if(lastQuad && video.videoWidth){
+    const p=lastQuad.map(videoToDisplay);
+    g.beginPath(); g.moveTo(p[0].x,p[0].y);
+    for(let i=1;i<4;i++) g.lineTo(p[i].x,p[i].y);
+    g.closePath();
+    g.fillStyle='rgba(200,240,49,.14)'; g.fill();
+    g.lineWidth=3; g.lineJoin='round'; g.strokeStyle='#C8F031'; g.stroke();
+    g.fillStyle='#C8F031';
+    p.forEach(q=>{ g.beginPath(); g.arc(q.x,q.y,6,0,Math.PI*2); g.fill(); });
+    chip.className='detchip locked'; t.textContent='Documento detectado';
+    $('#staticGuide').style.opacity=0;
+  }else{
+    chip.className='detchip'; t.textContent = cvReady?'Aponte para o documento':'Preparando detector…';
+    $('#staticGuide').style.opacity=1;
+  }
+}
+
+/* ---------- recorte + correção de perspectiva ---------- */
+function orderQuad(q){
+  const sum=[...q].sort((a,b)=>(a.x+a.y)-(b.x+b.y));
+  const dif=[...q].sort((a,b)=>(a.x-a.y)-(b.x-b.y));
+  return [sum[0], dif[3], sum[3], dif[0]]; // tl, tr, br, bl
+}
+function dst2(a,b){ return Math.hypot(a.x-b.x,a.y-b.y); }
+
+function warpCanvas(quad){
+  const [tl,tr,br,bl]=orderQuad(quad);
+  let W=Math.round(Math.max(dst2(tl,tr),dst2(bl,br)));
+  let H=Math.round(Math.max(dst2(tl,bl),dst2(tr,br)));
+  const MAX=1800, scl=Math.min(1,MAX/Math.max(W,H));
+  W=Math.max(4,Math.round(W*scl)); H=Math.max(4,Math.round(H*scl));
+  const vw=video.videoWidth, vh=video.videoHeight;
+  const full=document.createElement('canvas'); full.width=vw; full.height=vh;
+  full.getContext('2d').drawImage(video,0,0,vw,vh);
+  let src=CV.imread(full), out=new CV.Mat();
+  const sT=CV.matFromArray(4,1,CV.CV_32FC2,[tl.x,tl.y,tr.x,tr.y,br.x,br.y,bl.x,bl.y]);
+  const dT=CV.matFromArray(4,1,CV.CV_32FC2,[0,0,W,0,W,H,0,H]);
+  const M=CV.getPerspectiveTransform(sT,dT);
+  CV.warpPerspective(src,out,M,new CV.Size(W,H),CV.INTER_LINEAR,CV.BORDER_CONSTANT,new CV.Scalar(255,255,255,255));
+  const cv=document.createElement('canvas'); cv.width=W; cv.height=H; CV.imshow(cv,out);
+  [src,out,sT,dT,M].forEach(m=>{ try{ m.delete(); }catch(e){} });
+  return cv;
+}
+
+/* quadro inteiro (fallback quando não há documento detectado) */
+function fullFrameCanvas(){
+  const vw=video.videoWidth||1280, vh=video.videoHeight||720;
+  const MAX=1800, s=Math.min(1,MAX/Math.max(vw,vh));
+  const w=Math.round(vw*s), h=Math.round(vh*s);
+  const c=document.createElement('canvas'); c.width=w; c.height=h;
+  c.getContext('2d').drawImage(video,0,0,w,h);
+  return c;
+}
+
+/* ---------- nitidez + contraste (aplicado no canvas final) ---------- */
+function enhance(canvas){
+  const w=canvas.width, h=canvas.height;
+  const ctx=canvas.getContext('2d',{willReadFrequently:true});
   const img=ctx.getImageData(0,0,w,h), d=img.data;
   const doc = filter==='doc';
   const contrast = doc?1.55:1.22, bright = doc?10:5;
@@ -394,7 +544,7 @@ function processFrame(){
     if(doc){
       let y=0.299*r+0.587*g+0.114*b;
       y=(y-128)*contrast+128+bright;
-      if(y>205) y=Math.min(255,y+18);      // clareia o papel
+      if(y>205) y=Math.min(255,y+18);
       d[i]=d[i+1]=d[i+2]=clamp(y);
     }else{
       d[i]=clamp((r-128)*contrast+128+bright);
@@ -404,7 +554,6 @@ function processFrame(){
   }
   ctx.putImageData(img,0,0);
   sharpen(ctx,w,h, doc?0.7:0.5);
-  return work;
 }
 
 function sharpen(ctx,w,h,k){
@@ -430,12 +579,16 @@ async function capture(){
   if(!stream) return;
   $('#flash').classList.remove('fire'); void $('#flash').offsetWidth; $('#flash').classList.add('fire');
   if(navigator.vibrate) navigator.vibrate(30);
-  const cv=processFrame();
-  // guarda uma cópia (o work é reutilizado)
-  const copy=document.createElement('canvas'); copy.width=cv.width; copy.height=cv.height;
-  copy.getContext('2d').drawImage(cv,0,0);
-  stagedCanvas=copy;
-  $('#reviewImg').src=copy.toDataURL('image/jpeg',0.9);
+  let canvas;
+  if(cvReady && autoCrop && lastQuad){
+    try{ canvas=warpCanvas(lastQuad); }
+    catch(e){ canvas=fullFrameCanvas(); }
+  }else{
+    canvas=fullFrameCanvas();
+  }
+  enhance(canvas);
+  stagedCanvas=canvas;
+  $('#reviewImg').src=canvas.toDataURL('image/jpeg',0.9);
   show('#scrReview');
 }
 
@@ -598,9 +751,15 @@ $('#btnWhats').onclick=shareWhats;
 $('#btnSaveAri').onclick=saveAri;
 $('#btnDownload').onclick=downloadPdf;
 $('#btnNew').onclick=newSession;
+$('#btnCrop').onclick=()=>{
+  autoCrop=!autoCrop;
+  $('#btnCrop').classList.toggle('on',autoCrop);
+  toast(autoCrop?'Recorte automático ligado':'Recorte automático desligado — captura a folha inteira');
+};
 
 refreshTray();
 startCamera();
+requestAnimationFrame(loop);
 })();
 </script>
 </body>
