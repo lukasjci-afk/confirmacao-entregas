@@ -12,7 +12,6 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-<script async src="https://docs.opencv.org/4.8.0/opencv.js"></script>
 <style>
   :root{
     --void:#0E1116; --steel:#171C24; --steel2:#1E2530; --line:#2A333F;
@@ -182,6 +181,18 @@
 
   .review-img{width:100%;border-radius:12px;border:1px solid var(--line);
     box-shadow:0 8px 30px rgba(0,0,0,.5);display:block;background:#fff}
+
+  /* editor de cantos */
+  .crop-wrap{flex:1;min-height:0;display:flex;flex-direction:column;padding:12px var(--pad) 4px}
+  .crop-area{position:relative;flex:1;min-height:0;touch-action:none;overflow:hidden}
+  #cropImg{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;user-select:none;pointer-events:none}
+  #cropSvg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+  #cropPoly{fill:rgba(200,240,49,.12);stroke:#C8F031;stroke-width:2.5;stroke-linejoin:round}
+  .handle{position:absolute;width:28px;height:28px;margin:-14px;border-radius:50%;
+    border:3px solid #0E1116;background:#C8F031;box-shadow:0 2px 8px rgba(0,0,0,.55);
+    touch-action:none;cursor:grab;z-index:3}
+  .handle::after{content:"";position:absolute;inset:-14px;border-radius:50%}
+  .crop-hint{text-align:center;color:var(--slate);font-size:12.5px;padding:9px 0 3px;flex:none}
   .review-actions{flex:none;padding:12px var(--pad) calc(env(safe-area-inset-bottom) + 14px);
     border-top:1px solid var(--line);display:flex;gap:10px}
 
@@ -292,16 +303,27 @@
     </footer>
   </section>
 
-  <!-- ══════════ REVISÃO ══════════ -->
+  <!-- ══════════ REVISÃO / AJUSTE DE CANTOS ══════════ -->
   <section class="screen" id="scrReview">
     <div class="fullhead">
       <button class="x" id="reviewBack" aria-label="Voltar">×</button>
-      <h2>Conferir imagem</h2>
+      <h2>Ajuste os cantos</h2>
     </div>
-    <div class="body"><img class="review-img" id="reviewImg" alt="Prévia do canhoto"></div>
+    <div class="crop-wrap">
+      <div class="crop-area" id="cropArea">
+        <img id="cropImg" alt="Foto capturada">
+        <svg id="cropSvg"><polygon id="cropPoly" points=""></polygon></svg>
+        <div class="handle" data-c="0"></div>
+        <div class="handle" data-c="1"></div>
+        <div class="handle" data-c="2"></div>
+        <div class="handle" data-c="3"></div>
+      </div>
+      <div class="crop-hint" id="cropTools">Arraste as bolinhas até as 4 quinas do canhoto</div>
+    </div>
     <div class="review-actions">
-      <button class="btn retake grow" id="btnRetake">Repetir</button>
-      <button class="btn use grow" id="btnUse">Usar imagem</button>
+      <button class="btn retake" id="btnRetake">Repetir</button>
+      <button class="btn ghost" id="btnFullFrame">Folha inteira</button>
+      <button class="btn use grow" id="btnUse">Usar</button>
     </div>
   </section>
 
@@ -409,13 +431,31 @@ async function startCamera(){
 }
 
 /* ---------- processamento p/ legibilidade ---------- */
-/* ---------- OpenCV: inicialização tolerante a diferentes builds ---------- */
+/* ---------- OpenCV: carrega de vários CDNs (um de reserva) ---------- */
+let cvFailed=false;
+function loadCv(urls,i){
+  i=i||0;
+  if(i>=urls.length){ cvFailed=true; return; }
+  const s=document.createElement('script');
+  s.async=true; s.src=urls[i];
+  s.onerror=()=>{ s.remove(); loadCv(urls,i+1); };
+  document.head.appendChild(s);
+}
+loadCv([
+  'https://docs.opencv.org/4.10.0/opencv.js',
+  'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js',
+  'https://unpkg.com/@techstark/opencv-js@4.10.0-release.1/dist/opencv.js',
+  'https://docs.opencv.org/4.5.0/opencv.js'
+]);
+
 (function initCv(){
   const g=window;
   if(g.cv && g.cv.Mat){ CV=g.cv; cvReady=true; return; }
   if(g.cv && typeof g.cv.then==='function'){ g.cv.then(m=>{ CV=m||g.cv; cvReady=!!(CV&&CV.Mat); }); }
-  setTimeout(initCv,150);
+  if(!cvReady) setTimeout(initCv,150);
 })();
+// se depois de 25s ainda não carregou, avisa (o scan segue sem recorte)
+setTimeout(()=>{ if(!cvReady) cvFailed=true; }, 25000);
 
 /* ---------- laço de detecção + desenho da borda ---------- */
 function loop(){
@@ -438,25 +478,26 @@ function detect(now){
     src=CV.imread(detCanvas);
     gray=new CV.Mat(); CV.cvtColor(src,gray,CV.COLOR_RGBA2GRAY);
     CV.GaussianBlur(gray,gray,new CV.Size(5,5),0);
-    edges=new CV.Mat(); CV.Canny(gray,edges,60,180);
-    ker=CV.Mat.ones(3,3,CV.CV_8U); CV.dilate(edges,edges,ker);
+    edges=new CV.Mat(); CV.Canny(gray,edges,50,150);
+    ker=CV.Mat.ones(5,5,CV.CV_8U); CV.morphologyEx(edges,edges,CV.MORPH_CLOSE,ker);
     cnts=new CV.MatVector(); hier=new CV.Mat();
     CV.findContours(edges,cnts,hier,CV.RETR_EXTERNAL,CV.CHAIN_APPROX_SIMPLE);
-    const areaMin=DET_W*dh*0.18; let bestA=areaMin, best=null;
-    for(let i=0;i<cnts.size();i++){
-      const c=cnts.get(i); const a=CV.contourArea(c);
-      if(a>bestA){
-        const peri=CV.arcLength(c,true); const ap=new CV.Mat();
-        CV.approxPolyDP(c,ap,0.02*peri,true);
+    // maior contorno acima de 10% da área
+    let maxA=DET_W*dh*0.10, idx=-1;
+    for(let i=0;i<cnts.size();i++){ const c=cnts.get(i); const a=CV.contourArea(c); c.delete(); if(a>maxA){ maxA=a; idx=i; } }
+    let found=null;
+    if(idx>=0){
+      const c=cnts.get(idx); const peri=CV.arcLength(c,true);
+      for(const e of [0.02,0.04,0.06,0.08]){
+        const ap=new CV.Mat(); CV.approxPolyDP(c,ap,e*peri,true);
         if(ap.rows===4 && CV.isContourConvex(ap)){
-          bestA=a; best=[];
-          for(let j=0;j<4;j++) best.push({x:ap.data32S[j*2]/s, y:ap.data32S[j*2+1]/s});
+          found=[]; for(let j=0;j<4;j++) found.push({x:ap.data32S[j*2]/s, y:ap.data32S[j*2+1]/s});
         }
-        ap.delete();
+        ap.delete(); if(found) break;
       }
       c.delete();
     }
-    if(best){ lastQuad=best; lastQuadAt=now; }
+    if(found){ lastQuad=found; lastQuadAt=now; }
     else if(now-lastQuadAt>450){ lastQuad=null; }
   }finally{
     [src,gray,edges,ker,cnts,hier].forEach(m=>{ try{ m&&m.delete(); }catch(e){} });
@@ -477,7 +518,6 @@ function drawOverlay(){
   const g=ov.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,sw,sh);
   const chip=$('#detChip'), t=chip.querySelector('.t');
 
-  if(!autoCrop){ chip.className='detchip off'; $('#staticGuide').style.opacity=1; return; }
   if(lastQuad && video.videoWidth){
     const p=lastQuad.map(videoToDisplay);
     g.beginPath(); g.moveTo(p[0].x,p[0].y);
@@ -490,8 +530,10 @@ function drawOverlay(){
     chip.className='detchip locked'; t.textContent='Documento detectado';
     $('#staticGuide').style.opacity=0;
   }else{
-    chip.className='detchip'; t.textContent = cvReady?'Aponte para o documento':'Preparando detector…';
-    $('#staticGuide').style.opacity=1;
+    chip.className='detchip'; $('#staticGuide').style.opacity=1;
+    t.textContent = cvReady ? 'Aponte para o documento'
+                  : cvFailed ? 'Ajuste os cantos após a foto'
+                  : 'Preparando detector…';
   }
 }
 
@@ -502,34 +544,41 @@ function orderQuad(q){
   return [sum[0], dif[3], sum[3], dif[0]]; // tl, tr, br, bl
 }
 function dst2(a,b){ return Math.hypot(a.x-b.x,a.y-b.y); }
+function clampN(v,a,b){ return v<a?a:v>b?b:v; }
 
-function warpCanvas(quad){
-  const [tl,tr,br,bl]=orderQuad(quad);
+function warpWithQuad(quad, srcCanvas){
+  const [tl,tr,br,bl]=quad;
   let W=Math.round(Math.max(dst2(tl,tr),dst2(bl,br)));
   let H=Math.round(Math.max(dst2(tl,bl),dst2(tr,br)));
   const MAX=1800, scl=Math.min(1,MAX/Math.max(W,H));
   W=Math.max(4,Math.round(W*scl)); H=Math.max(4,Math.round(H*scl));
-  const vw=video.videoWidth, vh=video.videoHeight;
-  const full=document.createElement('canvas'); full.width=vw; full.height=vh;
-  full.getContext('2d').drawImage(video,0,0,vw,vh);
-  let src=CV.imread(full), out=new CV.Mat();
+  let s=CV.imread(srcCanvas), out=new CV.Mat();
   const sT=CV.matFromArray(4,1,CV.CV_32FC2,[tl.x,tl.y,tr.x,tr.y,br.x,br.y,bl.x,bl.y]);
   const dT=CV.matFromArray(4,1,CV.CV_32FC2,[0,0,W,0,W,H,0,H]);
   const M=CV.getPerspectiveTransform(sT,dT);
-  CV.warpPerspective(src,out,M,new CV.Size(W,H),CV.INTER_LINEAR,CV.BORDER_CONSTANT,new CV.Scalar(255,255,255,255));
-  const cv=document.createElement('canvas'); cv.width=W; cv.height=H; CV.imshow(cv,out);
-  [src,out,sT,dT,M].forEach(m=>{ try{ m.delete(); }catch(e){} });
-  return cv;
+  CV.warpPerspective(s,out,M,new CV.Size(W,H),CV.INTER_LINEAR,CV.BORDER_CONSTANT,new CV.Scalar(255,255,255,255));
+  const c=document.createElement('canvas'); c.width=W; c.height=H; CV.imshow(c,out);
+  [s,out,sT,dT,M].forEach(m=>{ try{ m.delete(); }catch(e){} });
+  return c;
 }
 
-/* quadro inteiro (fallback quando não há documento detectado) */
-function fullFrameCanvas(){
-  const vw=video.videoWidth||1280, vh=video.videoHeight||720;
-  const MAX=1800, s=Math.min(1,MAX/Math.max(vw,vh));
-  const w=Math.round(vw*s), h=Math.round(vh*s);
-  const c=document.createElement('canvas'); c.width=w; c.height=h;
-  c.getContext('2d').drawImage(video,0,0,w,h);
+/* canvas do quadro cheio, limitado em resolução */
+function cappedCanvas(srcCanvas){
+  const iw=srcCanvas.width, ih=srcCanvas.height;
+  const MAX=1800, s=Math.min(1,MAX/Math.max(iw,ih));
+  const c=document.createElement('canvas'); c.width=Math.round(iw*s); c.height=Math.round(ih*s);
+  c.getContext('2d').drawImage(srcCanvas,0,0,c.width,c.height);
   return c;
+}
+function fullResCanvas(){
+  const vw=video.videoWidth||1280, vh=video.videoHeight||720;
+  const c=document.createElement('canvas'); c.width=vw; c.height=vh;
+  c.getContext('2d').drawImage(video,0,0,vw,vh);
+  return c;
+}
+function defaultQuad(w,h){
+  const mx=w*0.08, my=h*0.08;
+  return [{x:mx,y:my},{x:w-mx,y:my},{x:w-mx,y:h-my},{x:mx,y:h-my}];
 }
 
 /* ---------- nitidez + contraste (aplicado no canvas final) ---------- */
@@ -574,22 +623,55 @@ function sharpen(ctx,w,h,k){
   ctx.putImageData(dst,0,0);
 }
 
-/* ---------- captura ---------- */
+/* ---------- captura → editor de cantos ---------- */
+let capFull=null, capQuad=null, dragIdx=-1;
+
 async function capture(){
   if(!stream) return;
   $('#flash').classList.remove('fire'); void $('#flash').offsetWidth; $('#flash').classList.add('fire');
   if(navigator.vibrate) navigator.vibrate(30);
+  capFull=fullResCanvas();
+  capQuad = (cvReady && autoCrop && lastQuad)
+    ? orderQuad(lastQuad.map(p=>({x:p.x,y:p.y})))
+    : defaultQuad(capFull.width, capFull.height);
+  capQuad = capQuad.map(p=>({x:clampN(p.x,0,capFull.width), y:clampN(p.y,0,capFull.height)}));
+  openEditor();
+}
+
+function openEditor(){
+  const canEdit = cvReady;         // sem OpenCV não há como endireitar
+  $('#cropTools').style.display = canEdit ? 'block' : 'none';
+  $('#cropImg').src = capFull.toDataURL('image/jpeg',0.9);
+  show('#scrReview');
+  requestAnimationFrame(()=>requestAnimationFrame(layoutHandles));
+}
+
+function areaRect(){ return $('#cropArea').getBoundingClientRect(); }
+function imgRect(){
+  const a=areaRect(), iw=capFull.width, ih=capFull.height;
+  const scale=Math.min(a.width/iw, a.height/ih);
+  return { ox:(a.width-iw*scale)/2, oy:(a.height-ih*scale)/2, scale };
+}
+function imgToDisp(p){ const r=imgRect(); return {x:r.ox+p.x*r.scale, y:r.oy+p.y*r.scale}; }
+function dispToImg(x,y){ const r=imgRect(); return {x:(x-r.ox)/r.scale, y:(y-r.oy)/r.scale}; }
+function layoutHandles(){
+  if(!capQuad) return;
+  const pts=capQuad.map(imgToDisp);
+  document.querySelectorAll('.handle').forEach((h,i)=>{ h.style.left=pts[i].x+'px'; h.style.top=pts[i].y+'px'; });
+  $('#cropPoly').setAttribute('points', pts.map(p=>p.x+','+p.y).join(' '));
+}
+
+function finalizeCrop(useFull){
   let canvas;
-  if(cvReady && autoCrop && lastQuad){
-    try{ canvas=warpCanvas(lastQuad); }
-    catch(e){ canvas=fullFrameCanvas(); }
+  if(!useFull && cvReady && capQuad){
+    try{ canvas=warpWithQuad(capQuad, capFull); }
+    catch(e){ canvas=cappedCanvas(capFull); }
   }else{
-    canvas=fullFrameCanvas();
+    canvas=cappedCanvas(capFull);
   }
   enhance(canvas);
   stagedCanvas=canvas;
-  $('#reviewImg').src=canvas.toDataURL('image/jpeg',0.9);
-  show('#scrReview');
+  commitPage();
 }
 
 function commitPage(){
@@ -742,9 +824,26 @@ $('#filterSeg').onclick=e=>{ const b=e.target.closest('button'); if(!b)return;
   $('#filterSeg').querySelectorAll('button').forEach(x=>x.classList.remove('on')); b.classList.add('on'); filter=b.dataset.f;
 };
 $('#btnFinish').onclick=buildAndExport;
-$('#btnRetake').onclick=()=>{ stagedCanvas=null; show('#scrCamera'); };
-$('#reviewBack').onclick=()=>{ stagedCanvas=null; show('#scrCamera'); };
-$('#btnUse').onclick=commitPage;
+$('#btnRetake').onclick=()=>{ capFull=null; show('#scrCamera'); };
+$('#reviewBack').onclick=()=>{ capFull=null; show('#scrCamera'); };
+$('#btnUse').onclick=()=>finalizeCrop(false);
+$('#btnFullFrame').onclick=()=>finalizeCrop(true);
+
+/* arrasto dos cantos */
+$('#cropArea').addEventListener('pointerdown',e=>{
+  const h=e.target.closest('.handle'); if(!h) return;
+  dragIdx=+h.dataset.c; try{ h.setPointerCapture(e.pointerId); }catch(_){}
+});
+$('#cropArea').addEventListener('pointermove',e=>{
+  if(dragIdx<0||!capFull) return;
+  const a=areaRect(); const ip=dispToImg(e.clientX-a.left, e.clientY-a.top);
+  capQuad[dragIdx]={x:clampN(ip.x,0,capFull.width), y:clampN(ip.y,0,capFull.height)};
+  layoutHandles();
+});
+const endDrag=()=>{ dragIdx=-1; };
+$('#cropArea').addEventListener('pointerup',endDrag);
+$('#cropArea').addEventListener('pointercancel',endDrag);
+window.addEventListener('resize',()=>{ if($('#scrReview').classList.contains('on')) layoutHandles(); });
 $('#exportBack').onclick=()=>show('#scrCamera');
 $('#btnAddMore').onclick=()=>{ if(mode==='single'){ $('#modePill').querySelector('[data-mode=batch]').click(); } show('#scrCamera'); };
 $('#btnWhats').onclick=shareWhats;
@@ -754,7 +853,7 @@ $('#btnNew').onclick=newSession;
 $('#btnCrop').onclick=()=>{
   autoCrop=!autoCrop;
   $('#btnCrop').classList.toggle('on',autoCrop);
-  toast(autoCrop?'Recorte automático ligado':'Recorte automático desligado — captura a folha inteira');
+  toast(autoCrop?'Detecção automática ligada':'Detecção desligada — você posiciona os cantos');
 };
 
 refreshTray();
