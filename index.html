@@ -543,21 +543,62 @@ function loop(){
   drawOverlay();
 }
 
-function quadLooksOk(q){
+function polyArea(q){
+  let a=0; for(let i=0;i<4;i++){ const p=q[i], n=q[(i+1)%4]; a += p.x*n.y - n.x*p.y; }
+  return Math.abs(a)/2;
+}
+/* valida se o quadrilátero parece uma folha: tamanho, proporção, lados opostos
+   parecidos e cantos próximos de 90° (impede trapézios malucos) */
+function quadLooksOk(q, vw, vh){
   const o=orderQuad(q);
-  const w=(dst2(o[0],o[1])+dst2(o[3],o[2]))/2;
-  const h=(dst2(o[0],o[3])+dst2(o[1],o[2]))/2;
-  if(w<38||h<38) return false;                 // muito pequeno
-  const ar=Math.max(w,h)/Math.min(w,h);
-  if(ar>7) return false;                        // fino demais (linha, borda)
-  const vw=video.videoWidth||1, vh=video.videoHeight||1;
-  if(w>vw*0.985 && h>vh*0.985) return false;    // é a moldura do vídeo inteiro
+  const top=dst2(o[0],o[1]), bot=dst2(o[3],o[2]);
+  const left=dst2(o[0],o[3]), right=dst2(o[1],o[2]);
+  const w=(top+bot)/2, hh=(left+right)/2;
+  if(w<50||hh<50) return false;                       // pequeno demais
+  const ar=Math.max(w,hh)/Math.min(w,hh);
+  if(ar>4.5) return false;                            // fino demais
+  // lados opostos não podem ser muito diferentes (perspectiva razoável)
+  if(Math.min(top,bot)/Math.max(top,bot) < 0.5) return false;
+  if(Math.min(left,right)/Math.max(left,right) < 0.5) return false;
+  // cantos entre 55° e 125°
+  for(let i=0;i<4;i++){
+    const p=o[i], a=o[(i+3)%4], b=o[(i+1)%4];
+    const v1={x:a.x-p.x,y:a.y-p.y}, v2={x:b.x-p.x,y:b.y-p.y};
+    const cos=(v1.x*v2.x+v1.y*v2.y)/((Math.hypot(v1.x,v1.y)*Math.hypot(v2.x,v2.y))||1);
+    const ang=Math.acos(Math.max(-1,Math.min(1,cos)))*180/Math.PI;
+    if(ang<55||ang>125) return false;
+  }
+  // não pode ocupar quase o quadro inteiro (seria a borda da imagem)
+  if(polyArea(o) > vw*vh*0.93) return false;
   return true;
+}
+/* média de cinza dentro do quadrilátero (amostragem esparsa) */
+function meanInsideQuad(gray, q, s){
+  const o=q.map(p=>({x:p.x*s, y:p.y*s}));
+  let minx=1e9,maxx=-1e9,miny=1e9,maxy=-1e9;
+  o.forEach(p=>{ minx=Math.min(minx,p.x);maxx=Math.max(maxx,p.x);miny=Math.min(miny,p.y);maxy=Math.max(maxy,p.y); });
+  const W=gray.cols, H=gray.rows, d=gray.data;
+  let sum=0,n=0;
+  const stepX=Math.max(1,Math.round((maxx-minx)/12)), stepY=Math.max(1,Math.round((maxy-miny)/12));
+  for(let y=Math.max(0,Math.round(miny));y<Math.min(H,maxy);y+=stepY){
+    for(let x=Math.max(0,Math.round(minx));x<Math.min(W,maxx);x+=stepX){
+      if(pointInQuad(x,y,o)){ sum+=d[y*W+x]; n++; }
+    }
+  }
+  return n? sum/n : 0;
+}
+function pointInQuad(x,y,o){
+  let inside=false;
+  for(let i=0,j=3;i<4;j=i++){
+    const xi=o[i].x, yi=o[i].y, xj=o[j].x, yj=o[j].y;
+    if(((yi>y)!==(yj>y)) && (x < (xj-xi)*(y-yi)/((yj-yi)||1e-6)+xi)) inside=!inside;
+  }
+  return inside;
 }
 function smoothQuad(prev,cur){
   const moved=dst2(prev[0],cur[0])+dst2(prev[2],cur[2]);
-  if(moved > (video.videoWidth||1000)*0.5) return cur;   // trocou de documento
-  const a=0.45;
+  if(moved > (video.videoWidth||1000)*0.4) return cur;   // trocou de documento
+  const a=0.4;
   return prev.map((p,i)=>({x:p.x+(cur[i].x-p.x)*a, y:p.y+(cur[i].y-p.y)*a}));
 }
 
@@ -572,46 +613,57 @@ function detect(now){
     src=CV.imread(detCanvas);
     gray=new CV.Mat(); CV.cvtColor(src,gray,CV.COLOR_RGBA2GRAY);
     blur=new CV.Mat(); CV.GaussianBlur(gray,blur,new CV.Size(5,5),0);
-    edges=new CV.Mat(); CV.Canny(blur,edges,40,120);
-    ker=CV.Mat.ones(5,5,CV.CV_8U);
-    CV.dilate(edges,edges,ker);                          // engorda bordas p/ fechar o contorno do papel
+    edges=new CV.Mat(); CV.Canny(blur,edges,50,140);
+    ker=CV.Mat.ones(3,3,CV.CV_8U);                       // kernel menor: não funde o papel com a bagunça
     CV.morphologyEx(edges,edges,CV.MORPH_CLOSE,ker);
     cnts=new CV.MatVector(); hier=new CV.Mat();
     CV.findContours(edges,cnts,hier,CV.RETR_LIST,CV.CHAIN_APPROX_SIMPLE);
 
-    const minArea=DET_W*dh*0.05;                         // aceita documento menor / mais longe
-    const items=[];
-    for(let i=0;i<cnts.size();i++){ const c=cnts.get(i); const a=CV.contourArea(c); c.delete(); if(a>minArea) items.push({i,a}); }
-    items.sort((x,y)=>y.a-x.a);
+    // brilho médio da cena (para saber se o candidato é mais claro que o fundo)
+    const sceneMean=CV.mean(gray)[0];
 
-    let found=null;
-    // 1) procura quadrilátero de 4 cantos entre os maiores contornos
-    for(let k=0;k<Math.min(items.length,6) && !found;k++){
-      const c=cnts.get(items[k].i); const peri=CV.arcLength(c,true);
-      for(const e of [0.02,0.03,0.05,0.07]){
+    const frameArea=DET_W*dh;
+    const minArea=frameArea*0.05;
+    const cand=[];
+    for(let i=0;i<cnts.size();i++){
+      const c=cnts.get(i); const a=CV.contourArea(c);
+      if(a<minArea || a>frameArea*0.95){ c.delete(); continue; }
+      const peri=CV.arcLength(c,true);
+      let q=null, fill=0;
+      for(const e of [0.02,0.03,0.045,0.06]){
         const ap=new CV.Mat(); CV.approxPolyDP(c,ap,e*peri,true);
         if(ap.rows===4 && CV.isContourConvex(ap)){
-          const q=[]; for(let j=0;j<4;j++) q.push({x:ap.data32S[j*2]/s, y:ap.data32S[j*2+1]/s});
-          if(quadLooksOk(q)) found=q;
+          const cq=[]; for(let j=0;j<4;j++) cq.push({x:ap.data32S[j*2]/s, y:ap.data32S[j*2+1]/s});
+          if(quadLooksOk(cq,vw,vh)){ q=cq; fill=a/Math.max(1,polyArea(cq)*s*s); }
         }
-        ap.delete(); if(found) break;
+        ap.delete(); if(q) break;
+      }
+      // reserva: retângulo rotacionado, mas só se o contorno realmente o preencher
+      if(!q){
+        try{
+          const rr=CV.minAreaRect(c); const pts=CV.RotatedRect.points(rr);
+          const rq=pts.map(p=>({x:p.x/s,y:p.y/s}));
+          const rectA=polyArea(rq)*s*s;
+          const ratio=a/Math.max(1,rectA);
+          if(ratio>0.72 && quadLooksOk(rq,vw,vh)){ q=rq; fill=ratio; }
+        }catch(e){}
+      }
+      if(q){
+        const bright=meanInsideQuad(gray,q,s);
+        // documento precisa ser mais claro que a cena (papel sobre mesa)
+        if(bright > sceneMean*1.04){
+          const areaScore=Math.min(1, polyArea(q)*s*s/(frameArea*0.6));
+          const score = areaScore*1.0 + fill*0.8 + Math.min(1,(bright-sceneMean)/60)*1.2;
+          cand.push({q,score});
+        }
       }
       c.delete();
     }
-    // 2) fallback: retângulo rotacionado do maior contorno — segue o papel mesmo sem 4 cantos limpos
-    if(!found && items.length){
-      const c=cnts.get(items[0].i);
-      try{
-        const rr=CV.minAreaRect(c);
-        const pts=CV.RotatedRect.points(rr);
-        const q=pts.map(p=>({x:p.x/s, y:p.y/s}));
-        if(quadLooksOk(q)) found=q;
-      }catch(e){}
-      c.delete();
-    }
+
+    cand.sort((a,b)=>b.score-a.score);
+    const found = cand.length ? orderQuad(cand[0].q) : null;
 
     if(found){
-      found=orderQuad(found);
       lastQuad = lastQuad ? smoothQuad(lastQuad, found) : found;
       lastQuadAt=now;
     } else if(now-lastQuadAt>500){ lastQuad=null; }
