@@ -543,40 +543,80 @@ function loop(){
   drawOverlay();
 }
 
+function quadLooksOk(q){
+  const o=orderQuad(q);
+  const w=(dst2(o[0],o[1])+dst2(o[3],o[2]))/2;
+  const h=(dst2(o[0],o[3])+dst2(o[1],o[2]))/2;
+  if(w<38||h<38) return false;                 // muito pequeno
+  const ar=Math.max(w,h)/Math.min(w,h);
+  if(ar>7) return false;                        // fino demais (linha, borda)
+  const vw=video.videoWidth||1, vh=video.videoHeight||1;
+  if(w>vw*0.985 && h>vh*0.985) return false;    // é a moldura do vídeo inteiro
+  return true;
+}
+function smoothQuad(prev,cur){
+  const moved=dst2(prev[0],cur[0])+dst2(prev[2],cur[2]);
+  if(moved > (video.videoWidth||1000)*0.5) return cur;   // trocou de documento
+  const a=0.45;
+  return prev.map((p,i)=>({x:p.x+(cur[i].x-p.x)*a, y:p.y+(cur[i].y-p.y)*a}));
+}
+
 function detect(now){
   const vw=video.videoWidth, vh=video.videoHeight;
   const s=DET_W/vw, dh=Math.round(vh*s);
   detCanvas.width=DET_W; detCanvas.height=dh;
   detCanvas.getContext('2d',{willReadFrequently:true}).drawImage(video,0,0,DET_W,dh);
 
-  let src,gray,edges,ker,cnts,hier;
+  let src,gray,blur,edges,ker,cnts,hier;
   try{
     src=CV.imread(detCanvas);
     gray=new CV.Mat(); CV.cvtColor(src,gray,CV.COLOR_RGBA2GRAY);
-    CV.GaussianBlur(gray,gray,new CV.Size(5,5),0);
-    edges=new CV.Mat(); CV.Canny(gray,edges,50,150);
-    ker=CV.Mat.ones(5,5,CV.CV_8U); CV.morphologyEx(edges,edges,CV.MORPH_CLOSE,ker);
+    blur=new CV.Mat(); CV.GaussianBlur(gray,blur,new CV.Size(5,5),0);
+    edges=new CV.Mat(); CV.Canny(blur,edges,40,120);
+    ker=CV.Mat.ones(5,5,CV.CV_8U);
+    CV.dilate(edges,edges,ker);                          // engorda bordas p/ fechar o contorno do papel
+    CV.morphologyEx(edges,edges,CV.MORPH_CLOSE,ker);
     cnts=new CV.MatVector(); hier=new CV.Mat();
-    CV.findContours(edges,cnts,hier,CV.RETR_EXTERNAL,CV.CHAIN_APPROX_SIMPLE);
-    // maior contorno acima de 10% da área
-    let maxA=DET_W*dh*0.10, idx=-1;
-    for(let i=0;i<cnts.size();i++){ const c=cnts.get(i); const a=CV.contourArea(c); c.delete(); if(a>maxA){ maxA=a; idx=i; } }
+    CV.findContours(edges,cnts,hier,CV.RETR_LIST,CV.CHAIN_APPROX_SIMPLE);
+
+    const minArea=DET_W*dh*0.05;                         // aceita documento menor / mais longe
+    const items=[];
+    for(let i=0;i<cnts.size();i++){ const c=cnts.get(i); const a=CV.contourArea(c); c.delete(); if(a>minArea) items.push({i,a}); }
+    items.sort((x,y)=>y.a-x.a);
+
     let found=null;
-    if(idx>=0){
-      const c=cnts.get(idx); const peri=CV.arcLength(c,true);
-      for(const e of [0.02,0.04,0.06,0.08]){
+    // 1) procura quadrilátero de 4 cantos entre os maiores contornos
+    for(let k=0;k<Math.min(items.length,6) && !found;k++){
+      const c=cnts.get(items[k].i); const peri=CV.arcLength(c,true);
+      for(const e of [0.02,0.03,0.05,0.07]){
         const ap=new CV.Mat(); CV.approxPolyDP(c,ap,e*peri,true);
         if(ap.rows===4 && CV.isContourConvex(ap)){
-          found=[]; for(let j=0;j<4;j++) found.push({x:ap.data32S[j*2]/s, y:ap.data32S[j*2+1]/s});
+          const q=[]; for(let j=0;j<4;j++) q.push({x:ap.data32S[j*2]/s, y:ap.data32S[j*2+1]/s});
+          if(quadLooksOk(q)) found=q;
         }
         ap.delete(); if(found) break;
       }
       c.delete();
     }
-    if(found){ lastQuad=found; lastQuadAt=now; }
-    else if(now-lastQuadAt>450){ lastQuad=null; }
+    // 2) fallback: retângulo rotacionado do maior contorno — segue o papel mesmo sem 4 cantos limpos
+    if(!found && items.length){
+      const c=cnts.get(items[0].i);
+      try{
+        const rr=CV.minAreaRect(c);
+        const pts=CV.RotatedRect.points(rr);
+        const q=pts.map(p=>({x:p.x/s, y:p.y/s}));
+        if(quadLooksOk(q)) found=q;
+      }catch(e){}
+      c.delete();
+    }
+
+    if(found){
+      found=orderQuad(found);
+      lastQuad = lastQuad ? smoothQuad(lastQuad, found) : found;
+      lastQuadAt=now;
+    } else if(now-lastQuadAt>500){ lastQuad=null; }
   }finally{
-    [src,gray,edges,ker,cnts,hier].forEach(m=>{ try{ m&&m.delete(); }catch(e){} });
+    [src,gray,blur,edges,ker,cnts,hier].forEach(m=>{ try{ m&&m.delete(); }catch(e){} });
   }
 }
 
