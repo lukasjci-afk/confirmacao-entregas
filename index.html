@@ -494,7 +494,7 @@ async function startCamera(){
   }
   try{
     stream=await navigator.mediaDevices.getUserMedia({
-      video:{ facingMode:{ideal:'environment'}, width:{ideal:2560}, height:{ideal:1440} }, audio:false
+      video:{ facingMode:{ideal:'environment'}, width:{ideal:3840}, height:{ideal:2160} }, audio:false
     });
     video.srcObject=stream; await video.play().catch(()=>{});
     shutter.disabled=false; $('#banner').style.display='none';
@@ -718,7 +718,7 @@ function warpWithQuad(quad, srcCanvas){
   const [tl,tr,br,bl]=quad;
   let W=Math.round(Math.max(dst2(tl,tr),dst2(bl,br)));
   let H=Math.round(Math.max(dst2(tl,bl),dst2(tr,br)));
-  const MAX=1800, scl=Math.min(1,MAX/Math.max(W,H));
+  const MAX=3000, scl=Math.min(1,MAX/Math.max(W,H));
   W=Math.max(4,Math.round(W*scl)); H=Math.max(4,Math.round(H*scl));
   let s=CV.imread(srcCanvas), out=new CV.Mat();
   const sT=CV.matFromArray(4,1,CV.CV_32FC2,[tl.x,tl.y,tr.x,tr.y,br.x,br.y,bl.x,bl.y]);
@@ -733,7 +733,7 @@ function warpWithQuad(quad, srcCanvas){
 /* canvas do quadro cheio, limitado em resolução */
 function cappedCanvas(srcCanvas){
   const iw=srcCanvas.width, ih=srcCanvas.height;
-  const MAX=1800, s=Math.min(1,MAX/Math.max(iw,ih));
+  const MAX=3000, s=Math.min(1,MAX/Math.max(iw,ih));
   const c=document.createElement('canvas'); c.width=Math.round(iw*s); c.height=Math.round(ih*s);
   c.getContext('2d').drawImage(srcCanvas,0,0,c.width,c.height);
   return c;
@@ -749,28 +749,106 @@ function defaultQuad(w,h){
   return [{x:mx,y:my},{x:w-mx,y:my},{x:w-mx,y:h-my},{x:mx,y:h-my}];
 }
 
-/* ---------- nitidez + contraste (aplicado no canvas final) ---------- */
+/* ---------- realce de documento (estilo scanner profissional) ----------
+   1) estima a iluminação do papel e divide por ela -> tira sombra, papel uniforme
+   2) auto-níveis: leva o papel ao branco puro e escurece a tinta
+   3) satura a tinta (azul/vermelha) no modo Cor
+   4) máscara de nitidez                                                     */
 function enhance(canvas){
-  const w=canvas.width, h=canvas.height;
+  if(cvReady){ try{ enhanceCV(canvas); return; }catch(e){} }
+  enhanceJS(canvas);
+}
+
+function enhanceCV(canvas){
+  const doc = filter==='doc';
+  let src=CV.imread(canvas);
+  let rgb=new CV.Mat(); CV.cvtColor(src,rgb,CV.COLOR_RGBA2RGB); src.delete();
+  const W=rgb.cols, H=rgb.rows;
+
+  // 1) fundo (iluminação) estimado em escala reduzida
+  const sw=320, sh=Math.max(1,Math.round(H*sw/W));
+  let small=new CV.Mat(); CV.resize(rgb,small,new CV.Size(sw,sh),0,0,CV.INTER_AREA);
+  const k=Math.max(3,((sw/12)|0)|1);
+  let ker=CV.getStructuringElement(CV.MORPH_ELLIPSE,new CV.Size(k,k));
+  let bgS=new CV.Mat(); CV.morphologyEx(small,bgS,CV.MORPH_CLOSE,ker);
+  CV.GaussianBlur(bgS,bgS,new CV.Size(0,0),sw/30);
+  let bg=new CV.Mat(); CV.resize(bgS,bg,new CV.Size(W,H),0,0,CV.INTER_LINEAR);
+  small.delete(); ker.delete(); bgS.delete();
+
+  // 2) divide pelo fundo direto em 8 bits (rápido): papel uniforme, sem sombra
+  let norm=new CV.Mat(); CV.divide(rgb,bg,norm,235.0,CV.CV_8U);
+  rgb.delete(); bg.delete();
+
+  // 3) auto-níveis pelo histograma (papel -> branco puro)
+  let g=new CV.Mat(); CV.cvtColor(norm,g,CV.COLOR_RGB2GRAY);
+  const pr=percentiles(g,[3,90]);
+  let bp=pr[0], wp=Math.max(pr[1],pr[0]+40);
+  const lo = doc ? bp*1.05 : bp*0.55;
+  const hi = doc ? wp*0.94 : wp*0.97;
+  const alpha=255/Math.max(1,(hi-lo)), beta=-lo*alpha;
+  let lev=new CV.Mat(); norm.convertTo(lev,CV.CV_8U,alpha,beta); norm.delete();
+
+  // 4) P&B: cinza puro | Cor: satura a tinta sem converter para HSV (mais rápido)
+  let out=new CV.Mat();
+  CV.cvtColor(lev,g,CV.COLOR_RGB2GRAY);
+  let gray3=new CV.Mat(); CV.cvtColor(g,gray3,CV.COLOR_GRAY2RGB); g.delete();
+  if(doc){ gray3.copyTo(out); }
+  else { CV.addWeighted(lev,1.45,gray3,-0.45,0,out); }   // out = cinza + (cor-cinza)*1.45
+  lev.delete(); gray3.delete();
+
+  // 5) máscara de nitidez (box blur: bem mais rápido que gaussiano)
+  const bk=Math.max(3,(Math.round(W/650)*2+1));
+  let blur=new CV.Mat(); CV.blur(out,blur,new CV.Size(bk,bk));
+  let sharp=new CV.Mat(); CV.addWeighted(out,1.65,blur,-0.65,0,sharp);
+  out.delete(); blur.delete();
+
+  let rgba=new CV.Mat(); CV.cvtColor(sharp,rgba,CV.COLOR_RGB2RGBA); sharp.delete();
+  CV.imshow(canvas,rgba); rgba.delete();
+}
+
+/* percentis via histograma */
+function percentiles(gray,list){
+  let hist=new CV.Mat(), mv=new CV.MatVector(); mv.push_back(gray);
+  const mask=new CV.Mat();
+  CV.calcHist(mv,[0],mask,hist,[256],[0,255]);
+  const total=gray.rows*gray.cols; const out=[]; let acc=0, li=0;
+  const targets=list.map(p=>total*p/100);
+  for(let i=0;i<256 && li<targets.length;i++){
+    acc+=hist.data32F[i];
+    while(li<targets.length && acc>=targets[li]){ out.push(i); li++; }
+  }
+  while(out.length<list.length) out.push(255);
+  hist.delete(); mv.delete(); mask.delete();
+  return out;
+}
+
+/* versão sem OpenCV (reserva): mesma ideia, mais simples */
+function enhanceJS(canvas){
+  const w=canvas.width,h=canvas.height;
   const ctx=canvas.getContext('2d',{willReadFrequently:true});
   const img=ctx.getImageData(0,0,w,h), d=img.data;
-  const doc = filter==='doc';
-  const contrast = doc?1.55:1.22, bright = doc?10:5;
+  const doc=filter==='doc';
+  // histograma p/ ponto branco
+  const hist=new Uint32Array(256);
+  for(let i=0;i<d.length;i+=4){ hist[(0.299*d[i]+0.587*d[i+1]+0.114*d[i+2])|0]++; }
+  const total=w*h; let acc=0,bp=0,wp=255;
+  for(let i=0;i<256;i++){ acc+=hist[i]; if(acc>=total*0.03){ bp=i; break; } }
+  acc=0; for(let i=0;i<256;i++){ acc+=hist[i]; if(acc>=total*0.90){ wp=i; break; } }
+  wp=Math.max(wp,bp+40);
+  const lo=doc?bp*1.05:bp*0.55, hi=doc?wp*0.94:wp*0.97;
+  const a=255/Math.max(1,hi-lo);
   for(let i=0;i<d.length;i+=4){
-    let r=d[i],g=d[i+1],b=d[i+2];
     if(doc){
-      let y=0.299*r+0.587*g+0.114*b;
-      y=(y-128)*contrast+128+bright;
-      if(y>205) y=Math.min(255,y+18);
+      let y=(0.299*d[i]+0.587*d[i+1]+0.114*d[i+2]-lo)*a;
       d[i]=d[i+1]=d[i+2]=clamp(y);
     }else{
-      d[i]=clamp((r-128)*contrast+128+bright);
-      d[i+1]=clamp((g-128)*contrast+128+bright);
-      d[i+2]=clamp((b-128)*contrast+128+bright);
+      const r=(d[i]-lo)*a, g2=(d[i+1]-lo)*a, b=(d[i+2]-lo)*a;
+      const m=(r+g2+b)/3;
+      d[i]=clamp(m+(r-m)*1.45); d[i+1]=clamp(m+(g2-m)*1.45); d[i+2]=clamp(m+(b-m)*1.45);
     }
   }
   ctx.putImageData(img,0,0);
-  sharpen(ctx,w,h, doc?0.7:0.5);
+  sharpen(ctx,w,h,0.6);
 }
 
 function sharpen(ctx,w,h,k){
@@ -844,7 +922,7 @@ function finalizeCrop(useFull){
 
 function commitPage(){
   if(!stagedCanvas) return;
-  pages.push({ dataUrl:stagedCanvas.toDataURL('image/jpeg',0.85), w:stagedCanvas.width, h:stagedCanvas.height });
+  pages.push({ dataUrl:stagedCanvas.toDataURL('image/jpeg',0.92), w:stagedCanvas.width, h:stagedCanvas.height });
   stagedCanvas=null;
   refreshTray();
   if(mode==='single'){ buildAndExport(); }
@@ -868,14 +946,18 @@ function refreshTray(){
 /* ---------- PDF ---------- */
 async function buildPdf(){
   const { jsPDF } = window.jspdf;
-  const pdf=new jsPDF({unit:'mm',format:'a4',compress:true});
-  const PW=210,PH=297,M=8, aW=PW-2*M, aH=PH-2*M;
+  // cada página assume a orientação da imagem (retrato/paisagem) e é
+  // preenchida de ponta a ponta — sem tarjas brancas
+  let pdf=null;
   pages.forEach((p,idx)=>{
-    if(idx>0) pdf.addPage();
+    const land = p.w > p.h;
+    const PW = land?297:210, PH = land?210:297;
+    if(idx===0) pdf=new jsPDF({unit:'mm', format:'a4', orientation: land?'landscape':'portrait', compress:true});
+    else pdf.addPage('a4', land?'landscape':'portrait');
     const ratio=p.w/p.h;
-    let dw=aW, dh=dw/ratio;
-    if(dh>aH){ dh=aH; dw=dh*ratio; }
-    pdf.addImage(p.dataUrl,'JPEG',(PW-dw)/2,(PH-dh)/2,dw,dh,undefined,'FAST');
+    let dw=PW, dh=dw/ratio;
+    if(dh>PH){ dh=PH; dw=dh*ratio; }
+    pdf.addImage(p.dataUrl,'JPEG',(PW-dw)/2,(PH-dh)/2,dw,dh,undefined,'MEDIUM');
   });
   const blob=pdf.output('blob');
   const d=new Date();
