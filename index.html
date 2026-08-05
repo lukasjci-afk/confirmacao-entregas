@@ -8,6 +8,20 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Confirmação de entrega(s)</title>
+
+<!-- Cartão de prévia (WhatsApp, e-mail, redes) -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="Confirmação de Entrega(s) — Transportes ARI">
+<meta property="og:description" content="Toque para abrir a câmera e escanear o canhoto assinado. Gera PDF e salva direto na ARI.">
+<meta property="og:image" content="https://lukasjci-afk.github.io/confirmacao-entregas/capa.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:url" content="https://lukasjci-afk.github.io/confirmacao-entregas/">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Confirmação de Entrega(s) — Transportes ARI">
+<meta name="twitter:description" content="Toque para abrir a câmera e escanear o canhoto assinado.">
+<meta name="twitter:image" content="https://lukasjci-afk.github.io/confirmacao-entregas/capa.png">
+
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -36,6 +50,31 @@
   /* screens */
   .screen{display:none;flex-direction:column;height:100%;min-height:0}
   .screen.on{display:flex}
+
+  /* tela inicial */
+  .welcome{
+    flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    text-align:center;padding:24px 26px calc(env(safe-area-inset-bottom) + 26px);
+    background:radial-gradient(120% 90% at 50% 0%, #1A222E 0%, var(--void) 60%);
+  }
+  .w-brand{font-family:"Barlow Condensed",sans-serif;text-transform:uppercase;letter-spacing:.14em;
+    font-size:14px;font-weight:700;color:var(--slate);margin-bottom:auto;padding-top:12px}
+  .w-brand b{color:var(--strap)}
+  .w-art{width:min(230px,64vw);margin:8px 0 6px}
+  .w-art svg{width:100%;height:auto;filter:drop-shadow(0 12px 24px rgba(0,0,0,.5))}
+  .w-title{font-family:"Barlow Condensed",sans-serif;text-transform:uppercase;letter-spacing:.02em;
+    font-size:clamp(28px,8vw,40px);line-height:.98;font-weight:700;margin:6px 0 12px}
+  .w-sub{color:var(--slate);font-size:14.5px;line-height:1.5;max-width:330px;margin:0 0 26px}
+  .w-btn{
+    display:flex;align-items:center;justify-content:center;gap:11px;width:100%;max-width:340px;
+    padding:17px;border:0;border-radius:15px;cursor:pointer;
+    background:linear-gradient(135deg,#FF6B1A,#FF9440);color:#1a0d04;
+    font-family:"Barlow Condensed",sans-serif;text-transform:uppercase;letter-spacing:.04em;
+    font-weight:700;font-size:19px;box-shadow:0 8px 26px rgba(255,107,26,.4);
+  }
+  .w-btn:active{transform:scale(.98)}
+  .w-btn svg{width:23px;height:23px}
+  .w-foot{color:var(--slate);font-size:12px;margin:16px 0 auto;opacity:.8}
 
   /* ---------- header ---------- */
   header{
@@ -257,8 +296,38 @@
 <body>
 <div id="app">
 
+  <!-- ══════════ TELA INICIAL ══════════ -->
+  <section class="screen on" id="scrWelcome">
+    <div class="welcome">
+      <div class="w-brand">TRANSPORTES <b>ARI</b></div>
+      <div class="w-art">
+        <svg viewBox="0 0 220 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="52" y="30" width="96" height="128" rx="6" fill="#F4F5F2" transform="rotate(-6 100 94)"/>
+          <g transform="rotate(-6 100 94)" stroke="#B9C0C9" stroke-width="3" stroke-linecap="round">
+            <line x1="66" y1="54" x2="134" y2="54"/><line x1="66" y1="68" x2="134" y2="68"/>
+            <line x1="66" y1="82" x2="120" y2="82"/><line x1="66" y1="96" x2="134" y2="96"/>
+            <line x1="66" y1="110" x2="118" y2="110"/>
+          </g>
+          <path d="M78 130 q10 -10 20 0 t20 0" transform="rotate(-6 100 94)" stroke="#2B6CF6" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+          <g stroke="#C8F031" stroke-width="5" stroke-linecap="round">
+            <path d="M40 44 h-16 v16"/><path d="M180 44 h16 v16"/>
+            <path d="M40 156 h-16 v-16"/><path d="M180 156 h16 v-16"/>
+          </g>
+          <rect x="22" y="86" width="176" height="6" rx="3" fill="#FF6B1A" opacity=".9"/>
+        </svg>
+      </div>
+      <h1 class="w-title">Confirmação de<br>entrega(s)</h1>
+      <p class="w-sub">Escaneie o canhoto assinado. O app recorta, melhora a nitidez e gera o PDF — que você salva direto na ARI.</p>
+      <button class="w-btn" id="btnStart">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="4"/></svg>
+        Escanear entrega
+      </button>
+      <div class="w-foot">Não precisa instalar nada · funciona no navegador</div>
+    </div>
+  </section>
+
   <!-- ══════════ CÂMERA ══════════ -->
-  <section class="screen on" id="scrCamera">
+  <section class="screen" id="scrCamera">
     <header>
       <div class="brand">CONFIRMAÇÃO DE <b>ENTREGA(S)</b><small>Transportes ARI · scanner de canhotos</small></div>
       <button class="hbtn on" id="btnCrop" title="Recorte automático">
@@ -856,8 +925,13 @@ $('#btnCrop').onclick=()=>{
   toast(autoCrop?'Detecção automática ligada':'Detecção desligada — você posiciona os cantos');
 };
 
+let camStarted=false;
+$('#btnStart').onclick=()=>{
+  show('#scrCamera');
+  if(!camStarted){ camStarted=true; startCamera(); }
+};
+
 refreshTray();
-startCamera();
 requestAnimationFrame(loop);
 })();
 </script>
