@@ -270,6 +270,19 @@
     font-weight:700;font-size:15px}
   .pdfcard .n{font-weight:700;font-size:15px;word-break:break-all;line-height:1.3}
   .pdfcard .s{font-size:12.5px;color:var(--slate);margin-top:3px}
+  .pdfmeta{min-width:0;flex:1}
+  .namerow{display:flex;align-items:center;gap:2px}
+  .nameinput{
+    flex:1;min-width:0;background:transparent;border:0;border-bottom:1px dashed transparent;
+    color:var(--mist);font-family:inherit;font-weight:700;font-size:15px;padding:2px 0;
+    outline:none;text-overflow:ellipsis;
+  }
+  .nameinput:focus{border-bottom-color:var(--strap)}
+  .namerow .ext{color:var(--slate);font-weight:700;font-size:15px;flex:none}
+  .editpen{flex:none;width:30px;height:30px;margin-left:4px;border-radius:8px;border:1px solid var(--line);
+    background:var(--void);color:var(--slate);cursor:pointer;display:grid;place-items:center}
+  .editpen svg{width:15px;height:15px}
+  .editpen:active{background:var(--line)}
   .pglist{display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:9px;margin-bottom:6px}
   .pglist figure{margin:0;position:relative}
   .pglist img{width:100%;aspect-ratio:3/4;object-fit:cover;border-radius:9px;border:1px solid var(--line);background:#fff;display:block}
@@ -412,8 +425,14 @@
     <div class="body">
       <div class="pdfcard">
         <div class="pdficon">PDF</div>
-        <div>
-          <div class="n" id="pdfName">confirmacao.pdf</div>
+        <div class="pdfmeta">
+          <div class="namerow">
+            <input type="text" id="pdfNameInput" class="nameinput" spellcheck="false" autocomplete="off" aria-label="Nome do arquivo PDF">
+            <span class="ext">.pdf</span>
+            <button class="editpen" id="btnEditName" aria-label="Editar nome" title="Renomear">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+            </button>
+          </div>
           <div class="s" id="pdfInfo">—</div>
         </div>
       </div>
@@ -980,7 +999,9 @@ function renderExport(){
   const sa=$('#btnSaveAri');
   if(sa){ sa.disabled=false;
     sa.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 13v8"/><path d="m8 17 4 4 4-4"/><path d="M20 16.5A4.5 4.5 0 0 0 17 8.5h-1.3A7 7 0 1 0 4 14.9"/></svg> Salvar ARI'; }
-  $('#pdfName').textContent=lastPdf.name;
+  // só preenche o nome se o usuário ainda não digitou um manualmente nesta sessão
+  const inp=$('#pdfNameInput');
+  if(inp && !nameEditedByUser){ inp.value = lastPdf.name.replace(/\.pdf$/i,''); }
   const kb=Math.round(lastPdf.blob.size/1024);
   $('#pdfInfo').textContent=`${pages.length} página(s) · ${kb>1024?(kb/1024).toFixed(1)+' MB':kb+' KB'}`;
   const l=$('#pgList');
@@ -991,6 +1012,18 @@ function renderExport(){
     rebuild();
   });
 }
+
+/* nome final escolhido pelo usuário (limpo e seguro para arquivo) */
+let nameEditedByUser=false;
+function finalName(){
+  const inp=$('#pdfNameInput');
+  let base = (inp && inp.value || '').trim();
+  if(!base) base = lastPdf.name.replace(/\.pdf$/i,'');
+  // remove caracteres inválidos para nome de arquivo
+  base = base.replace(/[\\/:*?"<>|]+/g,' ').replace(/\s+/g,' ').trim().slice(0,80);
+  if(!base) base = 'confirmacao-entrega';
+  return base + '.pdf';
+}
 async function rebuild(){
   overlay(true,'Atualizando PDF…','');
   await new Promise(r=>setTimeout(r,40));
@@ -1000,7 +1033,8 @@ async function rebuild(){
 /* ---------- envio ---------- */
 async function shareWhats(){
   if(!lastPdf) return;
-  const file=new File([lastPdf.blob],lastPdf.name,{type:'application/pdf'});
+  const nome=finalName();
+  const file=new File([lastPdf.blob],nome,{type:'application/pdf'});
   const d=new Date();
   const texto=`✅ Confirmação de entrega — ${pad(d.getDate())}/${pad(d.getMonth()+1)}/${d.getFullYear()}\n${pages.length} canhoto(s) em anexo.`;
   if(navigator.canShare && navigator.canShare({files:[file]})){
@@ -1022,7 +1056,7 @@ async function saveAri(){
   try{
     const b64=await blobToBase64(lastPdf.blob);
     const payload=JSON.stringify({
-      token:CONFIG.token, nome:lastPdf.name, pdf:b64,
+      token:CONFIG.token, nome:finalName(), pdf:b64,
       paginas:pages.length, data:new Date().toISOString()
     });
     // Content-Type text/plain = requisição "simples": evita o preflight CORS que o Apps Script não trata
@@ -1056,12 +1090,14 @@ function blobToBase64(blob){
 }
 function downloadPdf(){
   if(!lastPdf) return;
-  const a=document.createElement('a'); a.href=URL.createObjectURL(lastPdf.blob); a.download=lastPdf.name;
+  const a=document.createElement('a'); a.href=URL.createObjectURL(lastPdf.blob); a.download=finalName();
   document.body.appendChild(a); a.click(); a.remove(); toast('PDF baixado');
 }
 
 function newSession(){
-  pages.length=0; stagedCanvas=null; lastPdf=null; refreshTray(); show('#scrCamera');
+  pages.length=0; stagedCanvas=null; lastPdf=null; nameEditedByUser=false;
+  const inp=$('#pdfNameInput'); if(inp) inp.value='';
+  refreshTray(); show('#scrCamera');
 }
 
 /* ---------- eventos ---------- */
@@ -1100,6 +1136,11 @@ $('#btnWhats').onclick=shareWhats;
 $('#btnSaveAri').onclick=saveAri;
 $('#btnDownload').onclick=downloadPdf;
 $('#btnNew').onclick=newSession;
+
+// nome do PDF editável
+$('#pdfNameInput').oninput=()=>{ nameEditedByUser=true; };
+$('#btnEditName').onclick=()=>{ const i=$('#pdfNameInput'); i.focus(); i.select(); };
+$('#pdfNameInput').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); e.target.blur(); } });
 $('#btnCrop').onclick=()=>{
   autoCrop=!autoCrop;
   $('#btnCrop').classList.toggle('on',autoCrop);
